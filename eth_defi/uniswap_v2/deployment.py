@@ -248,6 +248,7 @@ def fetch_deployment(
     factory_address: Union[HexAddress, str],
     router_address: Union[HexAddress, str],
     init_code_hash: Optional[Union[HexStr, str]] = None,
+    skip_init_code_hash=False,
     allow_different_weth_var=True,
 ) -> UniswapV2Deployment:
     """Construct Uniswap deployment based on on-chain data.
@@ -288,7 +289,7 @@ def fetch_deployment(
     """
     factory = get_deployed_contract(web3, "sushi/UniswapV2Factory.json", factory_address)
     # https://github.com/sushiswap/sushiswap/blob/4fdfeb7dafe852e738c56f11a6cae855e2fc0046/contracts/uniswapv2/UniswapV2Factory.sol#L26
-    if init_code_hash is None:
+    if init_code_hash is None and not skip_init_code_hash:
         init_code_hash = factory.functions.pairCodeHash().call().hex()
     router = get_deployed_contract(web3, "sushi/UniswapV2Router02.json", router_address)
 
