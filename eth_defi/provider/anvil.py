@@ -143,6 +143,24 @@ def make_anvil_custom_rpc_request(web3: Web3, method: str, args: Optional[list] 
     raise RPCRequestError(response["error"]["message"])
 
 
+def reset_anvil(port=8545, fork_block_number=None, fork_url='http://127.0.0.1:8545'):
+    """If fork_block_number is None, we fork at the current block"""
+    fork_params = {
+        'forking': {
+            'url': fork_url,
+            'jsonRpcUrl': fork_url
+        },
+    }
+    if fork_block_number:
+        fork_params['forking']['blockNumber'] = fork_block_number
+    r = requests.post(f'http://127.0.0.1:{port}', json={"jsonrpc": "2.0",
+                                                        "method": "anvil_reset",
+                                                        "params": [fork_params],
+                                                        "id": 1})
+    r.raise_for_status()
+    logger.info('Anvil resetted on %s from fork url %s', f'http://127.0.0.1:{port}', fork_url)
+    return r.json()
+
 @dataclass
 class AnvilLaunch:
     """Control Anvil processes launched on background.
@@ -193,14 +211,15 @@ def launch_anvil(
     unlocked_addresses: list[Union[HexAddress, str]] = None,
     cmd="anvil",
     port: int = 19999,
+    fork_block: int = 0,
     block_time=0,
     launch_wait_seconds=20.0,
     attempts=3,
-    hardfork="london",
+    #hardfork="london",
     gas_limit: Optional[int] = None,
     steps_tracing=False,
     test_request_timeout=3.0,
-) -> AnvilLaunch:
+) :
     """Creates Anvil unit test backend or mainnet fork.
 
     - Anvil can be used as web3.py test backend instead of `EthereumTester`.
@@ -366,7 +385,8 @@ def launch_anvil(
     args = dict(
         port=port,
         fork=fork_url,
-        hardfork=hardfork,
+        fork_block=fork_block,
+        #hardfork=hardfork,
         gas_limit=gas_limit,
         steps_tracing=steps_tracing,
     )
@@ -397,7 +417,7 @@ def launch_anvil(
             except (requests.exceptions.ConnectionError, requests.exceptions.ReadTimeout) as e:
                 logger.info("Anvil not ready, got exception %s", e)
                 # requests.exceptions.ConnectionError: ('Connection aborted.', ConnectionResetError(54, 'Connection reset by peer'))
-                time.sleep(0.1)
+                time.sleep(1)
                 continue
 
         if current_block is None:
@@ -425,8 +445,11 @@ def launch_anvil(
     # Perform unlock accounts for all accounts
     for account in unlocked_addresses:
         unlock_account(web3, account)
+    logger.info("Started Anvil session: %s. Log accessible in terminal with: cat /proc/%s/fd/1 ", f'http:127.0.0.1:{port}',
+                process.pid)
 
-    return AnvilLaunch(port, final_cmd, url, process)
+    return AnvilLaunch(port, final_cmd, url, process), Web3(Web3.HTTPProvider(f"http://127.0.0.1:{port}"))
+
 
 
 def unlock_account(web3: Web3, address: str):
