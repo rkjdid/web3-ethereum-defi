@@ -199,30 +199,11 @@ def deploy_trading_pair(
 
     factory = deployment.factory
 
-    pair_address = factory.functions.getPair(token_a.address, token_b.address).call()
-
-    #Pair doest not exist yet
-    if pair_address == ZERO_ADDRESS_STR:
-        # https://github.com/sushiswap/sushiswap/blob/4fdfeb7dafe852e738c56f11a6cae855e2fc0046/contracts/uniswapv2/UniswapV2Factory.sol#L30
-        gas_limit = 2_500_000
-        tx_hash = factory.functions.createPair(token_a.address, token_b.address).transact({"from": deployer, "gas": gas_limit})
-        tx_receipt = web3.eth.wait_for_transaction_receipt(tx_hash)
-
-        if tx_receipt["status"] == 0:
-            reason = fetch_transaction_revert_reason(web3, tx_hash)
-            raise AssertionError(f"createPair({token_a.address}, {token_b.address}) transaction failed: {reason}, details: {tx_receipt}")
-
-        # https://ethereum.stackexchange.com/a/59288/620
-        # (AttributeDict({'args': AttributeDict({'token0': '0x2946259E0334f33A064106302415aD3391BeD384', 'token1': '0xB9816fC57977D5A786E654c7CF76767be63b966e', 'pair': '0x1278b4F4c25eE23DEEd803F16620009cBFbe7B13', '': 1}), 'event': 'PairCreated', 'logIndex': 0, 'transactionIndex': 0, 'transactionHash': HexBytes('0x5eea43a588a2f5865c4bc381e395f0db9db56dd1727d2433694df1faeacae33c'), 'address': '0xF2E246BB76DF876Cef8b38ae84130F4F55De395b', 'blockHash': HexBytes('0x13377d7e8a1b96165dbb777a5c98d313ba6a795d988007377fbc3c1df28c2a5b'), 'blockNumber': 6}),)
-        logs = factory.events.PairCreated().process_receipt(tx_receipt)
-        event0 = logs[0]
-        pair_address = event0["args"]["pair"]
-
     if liquidity_a > 0:
         router = deployment.router
 
-        assert token_a.functions.balanceOf(deployer).call() > liquidity_a, f"Cannot deploy, not enough tokens for {token_a}"
-        assert token_b.functions.balanceOf(deployer).call() > liquidity_b, f"Cannot deploy, not enough tokens for {token_b}"
+        assert token_a.functions.balanceOf(deployer).call() >= liquidity_a, f"Cannot deploy, not enough tokens for {token_a}"
+        assert token_b.functions.balanceOf(deployer).call() >= liquidity_b, f"Cannot deploy, not enough tokens for {token_b}"
 
         # Make sure there is allowance for ERC20.transferFrom()
         token_a.functions.approve(router.address, liquidity_a).transact({"from": deployer})
@@ -241,7 +222,7 @@ def deploy_trading_pair(
             FOREVER_DEADLINE,
         ).transact({"from": deployer})
 
-    return pair_address
+    return factory.functions.getPair(token_a.address, token_b.address).call()
 
 
 def fetch_deployment(
