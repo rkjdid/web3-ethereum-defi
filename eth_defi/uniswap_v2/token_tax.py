@@ -19,7 +19,6 @@ from eth_defi.token import fetch_erc20_details, TokenDetails
 
 from dataclasses import dataclass
 
-
 logger = logging.getLogger(__name__)
 
 
@@ -85,6 +84,208 @@ class TokenTaxInfo:
     sell_tax: float
 
 
+def swap_buy(uniswap: UniswapV2Deployment,
+    base_token: HexAddress,
+    quote_token: HexAddress,
+    buy_account: HexAddress,
+    buy_amount: float,
+    approve=True,
+    quote_token_details: Optional[TokenDetails] = None,
+    base_token_details: Optional[TokenDetails] = None,
+    gas_limit: Optional[int] = None,
+    gas_price: Optional[int] = None,):
+
+    web3: Web3 = uniswap.web3
+    router = uniswap.router
+
+    if not quote_token_details:
+        # No need to consider brokeness of token metadata
+        # when calculating tax
+        quote_token_details = fetch_erc20_details(web3, quote_token, raise_on_error=False)
+    quote_token = quote_token_details.contract
+
+    if not base_token_details:
+        # No need to consider brokeness of token metadata
+        # when calculating tax
+        base_token_details = fetch_erc20_details(web3, base_token, raise_on_error=False)
+    base_token = base_token_details.contract
+
+    if gas_limit:
+        # Try to eliminate some RPC calls by not doing gas oracle requests
+        # https://web3js.readthedocs.io/en/v1.2.11/web3-eth.html#sendtransaction
+        generic_tx_params = {
+            "gas": gas_limit,
+            "gasPrice": gas_price,
+        }
+    else:
+        generic_tx_params = {}
+
+    # approve router to spend tokens
+    if approve:
+        quote_token.functions.approve(router.address, quote_token_details.convert_to_raw(buy_amount)).transact({"from": buy_account} | generic_tx_params)
+
+    #The first element of path is the INPUT token, the last is the OUTPUT token
+    path = [quote_token.address, base_token.address]
+    amountIn = quote_token_details.convert_to_raw(buy_amount)
+    # Figure out base_token/quote_token trading pair
+    initial_base_bal = base_token.functions.balanceOf(buy_account).call()
+
+    #Theorical amount we would receive if no buy tax
+    uniswap_price = router.functions.getAmountsOut(amountIn, path).call()[1]
+
+    # Buy base_token with buy_account
+    try:
+        logger.info("Attempting to buy for path %s", path)
+        router.functions.swapExactTokensForTokensSupportingFeeOnTransferTokens(amountIn, 0, path, buy_account, FOREVER_DEADLINE).transact({"from": buy_account} | generic_tx_params)
+    except ContractLogicError as e:
+        msg = str(e)
+        if "TRANSFER_FAILED" in msg or "TRANSFER_FROM_FAILED" in msg:
+            raise TransferFromError(f"Token does not co-operate:{base_token_details.symbol} - {quote_token_details.symbol}, {e} to router {router.address}") from e
+        raise
+    except Exception as e:
+        raise SwapError(f"swapExactTokensForTokensSupportingFeeOnTransferTokens() buy failed:{base_token_details.symbol} - {quote_token_details.symbol}, {e} to router {router.address}") from e
+
+    received_amt = base_token.functions.balanceOf(buy_account).call() - initial_base_bal
+
+    if received_amt == 0:
+        # Nothing was received when we bought the token, so assume 100% tax
+        # Would cause division by zero later
+        return TokenTaxInfo(base_token.address, quote_token.address, 1.0, 1.0, 1.0)
+
+    # Measure the loss as "buy tax"
+    buy_tax_percent = ((uniswap_price - received_amt) / uniswap_price)*100
+    logger.info("Successfully bought %s tokens for %s ETH. Buy Tax = %s %. ", received_amt, amountIn, int(buy_tax_percent) )
+
+    return received_amt, buy_tax_percent
+
+def transfer(
+    uniswap: UniswapV2Deployment,
+    base_token: HexAddress,
+    quote_token: HexAddress,
+    buy_account: HexAddress, #account that send
+    sell_account: HexAddress, #account that receive
+    transfer_amount: float,
+    quote_token_details: Optional[TokenDetails] = None,
+    base_token_details: Optional[TokenDetails] = None,
+    gas_limit: Optional[int] = None,
+    gas_price: Optional[int] = None):
+
+    web3: Web3 = uniswap.web3
+
+    if not quote_token_details:
+        # No need to consider brokeness of token metadata
+        # when calculating tax
+        quote_token_details = fetch_erc20_details(web3, quote_token, raise_on_error=False)
+    quote_token = quote_token_details.contract
+
+    if not base_token_details:
+        # No need to consider brokeness of token metadata
+        # when calculating tax
+        base_token_details = fetch_erc20_details(web3, base_token, raise_on_error=False)
+    base_token = base_token_details.contract
+
+    if gas_limit:
+        # Try to eliminate some RPC calls by not doing gas oracle requests
+        # https://web3js.readthedocs.io/en/v1.2.11/web3-eth.html#sendtransaction
+        generic_tx_params = {
+            "gas": gas_limit,
+            "gasPrice": gas_price,
+        }
+    else:
+        generic_tx_params = {}
+
+    # Transfer tokens to sell_account
+    # Measure the loss as "transfer tax"
+    try:
+        base_token.functions.transfer(sell_account, transfer_amount).transact({"from": buy_account} | generic_tx_params)
+    except ValueError as e:
+        if "out of gas" in str(e):
+            raise OutOfGasDuringTransfer(f"Out of gas during transfer: {e}") from e
+        else:
+            raise TransferFailure(f"Transfer failure: {e}") from e
+
+    received_amt_by_seller = base_token.functions.balanceOf(sell_account).call()
+    transfer_tax_percent = ((transfer_amount - received_amt_by_seller) / transfer_amount)*100
+
+    logger.info("Successfully transfered %s tokens from %s to %s. Transfer Tax = %s %. ", transfer_amount, buy_account, sell_account, transfer_tax_percent )
+    return received_amt_by_seller, transfer_tax_percent
+
+
+def swap_sell(uniswap: UniswapV2Deployment,
+    base_token: HexAddress,
+    quote_token: HexAddress,
+    sell_account: HexAddress,
+    sell_amount: float,
+    quote_token_details: Optional[TokenDetails] = None,
+    base_token_details: Optional[TokenDetails] = None,
+    gas_limit: Optional[int] = None,
+    gas_price: Optional[int] = None,):
+
+    web3: Web3 = uniswap.web3
+    router = uniswap.router
+
+    if not quote_token_details:
+        # No need to consider brokeness of token metadata
+        # when calculating tax
+        quote_token_details = fetch_erc20_details(web3, quote_token, raise_on_error=False)
+    quote_token = quote_token_details.contract
+
+    if not base_token_details:
+        # No need to consider brokeness of token metadata
+        # when calculating tax
+        base_token_details = fetch_erc20_details(web3, base_token, raise_on_error=False)
+    base_token = base_token_details.contract
+
+    if gas_limit:
+        # Try to eliminate some RPC calls by not doing gas oracle requests
+        # https://web3js.readthedocs.io/en/v1.2.11/web3-eth.html#sendtransaction
+        generic_tx_params = {
+            "gas": gas_limit,
+            "gasPrice": gas_price,
+        }
+    else:
+        generic_tx_params = {}
+
+    init_balance_quote_token = quote_token.functions.balanceOf(sell_account).call()
+
+    # Sell tokens
+    try:
+        base_token.functions.approve(router.address, sell_amount).transact(
+            {"from": sell_account} | generic_tx_params)
+    except ValueError as e:
+        if "out of gas" in str(e):
+            raise ApprovalFailure() from e
+
+    path = [base_token.address, quote_token.address]
+
+    sell_tax_percent = 0
+    uniswap_theoric_amount = router.functions.getAmountsOut(sell_amount, path).call()[1]
+    try:
+        # this method will revert in case of low liquidity of the token
+        logger.info("Attempting to sell for path %s", path)
+        router.functions.swapExactTokensForTokensSupportingFeeOnTransferTokens(sell_amount, 0, path,
+                                                                               sell_account, FOREVER_DEADLINE).transact(
+            {"from": sell_account} | generic_tx_params)
+    except ValueError as e:
+        if "VM Exception while processing transaction: revert" in str(e):
+            raise SellFailed(f"Could not sell {base_token_details.symbol} - {quote_token_details.symbol}: {e}") from e
+        elif "out of gas" in str(e):
+            raise OutOfGasDuringTransfer() from e
+        raise
+    except Exception as e:
+        raise SwapError(
+            f"Sell failed. swapExactTokensForTokensSupportingFeeOnTransferTokens() method failed: {base_token_details.symbol} - {quote_token_details.symbol}: {e}") from e
+
+    # Measure the loss as "sell tax"
+    received_amt_after_sell = quote_token.functions.balanceOf(sell_account).call()-init_balance_quote_token
+
+    if received_amt_after_sell > 0:
+        sell_tax_percent = ((uniswap_theoric_amount - received_amt_after_sell) / uniswap_theoric_amount)*100 if uniswap_theoric_amount > 0 else 0
+
+    logger.info("Successfully sold %s tokens for %s ETH. Sell Tax = %s %. ", sell_amount, received_amt_after_sell, int(sell_tax_percent) )
+    return received_amt_after_sell, sell_tax_percent
+
+
 def estimate_token_taxes(
     uniswap: UniswapV2Deployment,
     base_token: HexAddress,
@@ -146,108 +347,12 @@ def estimate_token_taxes(
         ToxTaxInfo tells us what we figure out about taxes.
         This can be later recorded to a database.
     """
-    web3: Web3 = uniswap.web3
-    router = uniswap.router
 
-    if not quote_token_details:
-        # No need to consider brokeness of token metadata
-        # when calculating tax
-        quote_token_details = fetch_erc20_details(web3, quote_token, raise_on_error=False)
-    quote_token = quote_token_details.contract
+    token_bought_received, buy_tax_pct = swap_buy(uniswap, base_token, quote_token,buy_account,buy_amount,approve,
+                                              quote_token_details,base_token_details,gas_limit,gas_price)
+    token_transfer_received, transfer_tax_pct = transfer(uniswap, base_token, quote_token, buy_account, sell_account,
+                                                     token_bought_received,quote_token_details,base_token_details,gas_limit,gas_price)
+    token_sold_received, sell_tax_pct = swap_sell(uniswap,base_token,quote_token,sell_account,token_transfer_received,
+                                              quote_token_details,base_token_details,gas_limit,gas_price)
 
-    if not base_token_details:
-        # No need to consider brokeness of token metadata
-        # when calculating tax
-        base_token_details = fetch_erc20_details(web3, base_token, raise_on_error=False)
-    base_token = base_token_details.contract
-
-    if gas_limit:
-        # Try to eliminate some RPC calls by not doing gas oracle requests
-        # https://web3js.readthedocs.io/en/v1.2.11/web3-eth.html#sendtransaction
-        generic_tx_params = {
-            "gas": gas_limit,
-            "gasPrice": gas_price,
-        }
-    else:
-        generic_tx_params = {}
-
-    # approve router to spend tokens
-    if approve:
-        quote_token.functions.approve(router.address, quote_token_details.convert_to_raw(buy_amount)).transact({"from": buy_account} | generic_tx_params)
-
-    path = [quote_token.address, base_token.address]
-    amountIn = quote_token_details.convert_to_raw(buy_amount)
-    # Figure out base_token/quote_token trading pair
-    initial_base_bal = base_token.functions.balanceOf(buy_account).call()
-
-    # Buy base_token with buy_account
-    try:
-        logger.info("Attempting to buy for path %s", path)
-        router.functions.swapExactTokensForTokensSupportingFeeOnTransferTokens(amountIn, 0, path, buy_account, FOREVER_DEADLINE).transact({"from": buy_account} | generic_tx_params)
-    except ContractLogicError as e:
-        msg = str(e)
-        if "TRANSFER_FAILED" in msg or "TRANSFER_FROM_FAILED" in msg:
-            raise TransferFromError(f"Token does not co-operate:{base_token_details.symbol} - {quote_token_details.symbol}, {e} to router {router.address}") from e
-        raise
-    except Exception as e:
-        raise SwapError(f"swapExactTokensForTokensSupportingFeeOnTransferTokens() buy failed:{base_token_details.symbol} - {quote_token_details.symbol}, {e} to router {router.address}") from e
-
-    received_amt = base_token.functions.balanceOf(buy_account).call() - initial_base_bal
-
-    if received_amt == 0:
-        # Nothing was received when we bought the token, so assume 100% tax
-        # Would cause division by zero later
-        return TokenTaxInfo(base_token.address, quote_token.address, 1.0, 1.0, 1.0)
-
-    uniswap_price = router.functions.getAmountsOut(amountIn, path).call()[1]
-
-    # Measure the loss as "buy tax"
-    buy_tax_percent = (uniswap_price - received_amt) / uniswap_price
-
-    # Transfer tokens to sell_account
-    # Measure the loss as "transfer tax"
-    try:
-        base_token.functions.transfer(sell_account, received_amt).transact({"from": buy_account} | generic_tx_params)
-    except ValueError as e:
-        if "out of gas" in str(e):
-            raise OutOfGasDuringTransfer(f"Out of gas during transfer: {e}") from e
-        else:
-            raise TransferFailure(f"Transfer failure: {e}") from e
-
-    received_amt_by_seller = base_token.functions.balanceOf(sell_account).call()
-
-    transfer_tax_percent = (received_amt - received_amt_by_seller) / received_amt
-
-    # Sell tokens
-    try:
-        base_token.functions.approve(router.address, received_amt_by_seller).transact({"from": sell_account} | generic_tx_params)
-    except ValueError as e:
-        if "out of gas" in str(e):
-            raise ApprovalFailure() from e
-
-    path = [base_token.address, quote_token.address]
-
-    sell_tax = 0
-    sell_tax_percent = 0
-    try:
-        # this method will revert in case of low liquidity of the token
-        logger.info("Attempting to see for path %s", path)
-        router.functions.swapExactTokensForTokensSupportingFeeOnTransferTokens(received_amt_by_seller, 0, path, sell_account, FOREVER_DEADLINE).transact({"from": sell_account} | generic_tx_params)
-    except ValueError as e:
-        if "VM Exception while processing transaction: revert" in str(e):
-            raise SellFailed(f"Could not sell {base_token_details.symbol} - {quote_token_details.symbol}: {e}") from e
-        elif "out of gas" in str(e):
-            raise OutOfGasDuringTransfer() from e
-        raise
-    except Exception as e:
-        raise SwapError(f"Sell failed. swapExactTokensForTokensSupportingFeeOnTransferTokens() method failed: {base_token_details.symbol} - {quote_token_details.symbol}: {e}") from e
-
-    # Measure the loss as "sell tax"
-    received_amt_after_sell = quote_token.functions.balanceOf(sell_account).call()
-    uniswap_price = router.functions.getAmountsOut(received_amt_by_seller, path).call()[1]
-
-    if received_amt_after_sell > 0:
-        sell_tax = uniswap_price - received_amt_after_sell
-        sell_tax_percent = (sell_tax / uniswap_price) if uniswap_price > 0 else 0
-
-    return TokenTaxInfo(base_token.address, quote_token.address, buy_tax_percent, transfer_tax_percent, sell_tax_percent)
+    return TokenTaxInfo(base_token, quote_token, buy_tax_pct, transfer_tax_pct, sell_tax_pct)
