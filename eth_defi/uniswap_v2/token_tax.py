@@ -153,10 +153,11 @@ def swap_buy(uniswap: UniswapV2Deployment,
         return TokenTaxInfo(base_token.address, quote_token.address, 1.0, 1.0, 1.0)
 
     # Measure the loss as "buy tax"
-    buy_tax_percent = ((uniswap_price - received_amt) / uniswap_price)*100
-    logger.info("Successfully bought %s tokens for %s ETH. Buy Tax = %s %%. ", received_amt, amountIn, int(buy_tax_percent))
+    buy_tax = ((uniswap_price - received_amt) / uniswap_price)
+    logger.info("Successfully bought %s tokens for %s ETH. Buy Tax = %s %%. ", received_amt, amountIn, int(buy_tax))
 
-    return received_amt, buy_tax_percent
+    return received_amt, buy_tax
+
 
 def transfer(
     uniswap: UniswapV2Deployment,
@@ -197,10 +198,10 @@ def transfer(
             raise TransferFailure(f"Transfer failure: {e}") from e
 
     received_amt_by_seller = base_token.functions.balanceOf(sell_account).call()
-    transfer_tax_percent = ((transfer_amount - received_amt_by_seller) / transfer_amount)*100
+    transfer_tax = ((transfer_amount - received_amt_by_seller) / transfer_amount)
 
-    logger.info("Successfully transfered %s tokens from %s to %s. Transfer Tax = %s %%. ", transfer_amount, buy_account, sell_account, transfer_tax_percent )
-    return received_amt_by_seller, transfer_tax_percent
+    logger.info("Successfully transfered %s tokens from %s to %s. Transfer Tax = %s %%. ", transfer_amount, buy_account, sell_account, transfer_tax)
+    return received_amt_by_seller, transfer_tax
 
 
 def swap_sell(uniswap: UniswapV2Deployment,
@@ -272,10 +273,10 @@ def swap_sell(uniswap: UniswapV2Deployment,
     received_amt_after_sell = quote_token.functions.balanceOf(sell_account).call()-init_balance_quote_token
 
     if received_amt_after_sell > 0:
-        sell_tax_percent = ((uniswap_theoric_amount - received_amt_after_sell) / uniswap_theoric_amount)*100 if uniswap_theoric_amount > 0 else 0
+        sell_tax = ((uniswap_theoric_amount - received_amt_after_sell) / uniswap_theoric_amount) if uniswap_theoric_amount > 0 else 0
 
-    logger.info("Successfully sold %s tokens for %s ETH. Sell Tax = %s %%. ", sell_amount, received_amt_after_sell, int(sell_tax_percent) )
-    return received_amt_after_sell, sell_tax_percent
+    logger.info("Successfully sold %s tokens for %s ETH. Sell Tax = %s %%. ", sell_amount, received_amt_after_sell, int(sell_tax))
+    return received_amt_after_sell, sell_tax
 
 
 def estimate_token_taxes(
