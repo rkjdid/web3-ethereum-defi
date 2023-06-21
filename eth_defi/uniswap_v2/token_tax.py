@@ -156,7 +156,7 @@ def swap_buy(uniswap: UniswapV2Deployment,
     buy_tax = ((uniswap_price - received_amt) / uniswap_price)
     logger.info("Successfully bought %s tokens for %s ETH. Buy Tax = %s %%. ", received_amt, amountIn, int(buy_tax))
 
-    return received_amt, buy_tax
+    return received_amt, round(buy_tax, 4)
 
 
 def transfer(
@@ -201,7 +201,7 @@ def transfer(
     transfer_tax = ((transfer_amount - received_amt_by_seller) / transfer_amount)
 
     logger.info("Successfully transfered %s tokens from %s to %s. Transfer Tax = %s %%. ", transfer_amount, buy_account, sell_account, transfer_tax)
-    return received_amt_by_seller, transfer_tax
+    return received_amt_by_seller, round(transfer_tax, 4)
 
 
 def swap_sell(uniswap: UniswapV2Deployment,
@@ -251,7 +251,6 @@ def swap_sell(uniswap: UniswapV2Deployment,
 
     path = [base_token.address, quote_token.address]
 
-    sell_tax_percent = 0
     uniswap_theoric_amount = router.functions.getAmountsOut(sell_amount, path).call()[1]
     try:
         # this method will revert in case of low liquidity of the token
@@ -276,7 +275,7 @@ def swap_sell(uniswap: UniswapV2Deployment,
         sell_tax = ((uniswap_theoric_amount - received_amt_after_sell) / uniswap_theoric_amount) if uniswap_theoric_amount > 0 else 0
 
     logger.info("Successfully sold %s tokens for %s ETH. Sell Tax = %s %%. ", sell_amount, received_amt_after_sell, int(sell_tax))
-    return received_amt_after_sell, sell_tax
+    return received_amt_after_sell, round(sell_tax, 4)
 
 
 def estimate_token_taxes(
